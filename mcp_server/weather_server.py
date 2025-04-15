@@ -35,6 +35,5 @@ async def fetch_weather(province: str, city: str) -> str:
                     return f"请求失败，状态码: {response.status}"
         except Exception as e:
             return f"请求过程中出现错误: {e}"
-
 if __name__ == '__main__':
     print(asyncio.run(fetch_weather("江苏","南京")))

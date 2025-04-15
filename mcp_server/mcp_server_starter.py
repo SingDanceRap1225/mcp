@@ -1,3 +1,5 @@
+import asyncio
+
 from mcp.server.fastmcp import FastMCP
 import weather_server
 
@@ -8,6 +10,7 @@ mcp = FastMCP("MCPServer")
 @mcp.tool(name="查询当前天气", description="查询当前天气，需要省份和城市")
 async def quary_weather(province: str, city: str) -> str:
     weather_message = await weather_server.fetch_weather(province, city)
+    print(weather_message)
     return weather_message
 
 if __name__ == '__main__':
