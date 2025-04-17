@@ -37,7 +37,8 @@ class AIApp:
                 stream=self.stream,
                 temperature=self.temperature,
                 top_p=self.top_p,
-                tools=self.tools
+                tools=self.tools,
+                parallel_tool_calls=True
             )
             # if self.stream:
             #     response_text = ''

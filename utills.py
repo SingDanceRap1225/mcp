@@ -16,8 +16,15 @@ def format_available_tools(mcp_response):
     ]
 
 def handle_tool_call(content):
-    """处理工具调用"""
-    tool_call = content.message.tool_calls[0]
-    tool_name = tool_call.function.name
-    tool_args = json.loads(tool_call.function.arguments)
-    return tool_name, tool_args
+    parsed_tools = []
+    for tool_call in content.message.tool_calls:
+        tool_name = tool_call.function.name
+        tool_args = json.loads(tool_call.function.arguments)
+        parsed_tools.append({"name": tool_name, "args": tool_args})
+    return parsed_tools
+    # print(content.message.tool_calls)
+    # """处理工具调用"""
+    # tool_call = content.message.tool_calls[0]
+    # tool_name = tool_call.function.name
+    # tool_args = json.loads(tool_call.function.arguments)
+    # return tool_name, tool_args
