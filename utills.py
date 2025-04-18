@@ -1,7 +1,7 @@
 import json
 
 
-def format_available_tools(mcp_response):
+def format_available_tools(mcp_response) -> list:
     """格式化可用工具列表"""
     return [
         {

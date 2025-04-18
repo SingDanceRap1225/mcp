@@ -8,61 +8,91 @@ from utills import format_available_tools, handle_tool_call
 
 
 class MCPClient:
-    def __init__(self, llm: AIApp, server_script_path: str):
+    def __init__(self, llm: AIApp, server_script_path: list[str]):
         # 初始化对话 LLM
         self.llm_app = llm
+
         # 用于管理异步上下文的退出栈
         self.exit_stack = AsyncExitStack()
-        # MCP 客户端会话，初始化为 None
-        self.mcp_session: Optional[ClientSession] = None
+
+        # MCP 客户端会话，以字典形式存储不同服务器的会话信息
+        self.mcp_session = {}
+
         # MCP 服务器脚本路径
         self.server_script_path = server_script_path
 
-    def get_server_parameters(self) -> StdioServerParameters:
+        # 可用 MCP tools 列表
+        self.available_tools = []
+
+        # tool 与 server 的映射
+        self.tool_map = {}
+
+    def get_server_parameters(self, path) -> StdioServerParameters:
         """
         根据服务器脚本文件类型生成启动服务器所需的参数。
 
+        :param path: 服务器脚本文件路径
         :return: 包含服务器启动命令和参数的 StdioServerParameters 对象
         :raises ValueError: 如果脚本文件类型不是 .py 或 .jar
         """
-        if self.server_script_path.endswith('.py'):
+        if path.endswith('.py'):
             command = "python"
-            args = [self.server_script_path]
-        elif self.server_script_path.endswith('.jar'):
+            args = [path]
+        elif path.endswith('.jar'):
             command = "java"
             args = [
                 "-Dfile.encoding=UTF-8",
-                "-jar", self.server_script_path,
+                "-jar", path,
                 "-Dspring.ai.mcp.server.stdio=true",
-                "-Dspring.main.web-application-type=none",
-                "-Dlogging.pattern.console="
+                "-Dspring.main.web-application-type=none"
             ]
         else:
             raise ValueError("不支持的脚本文件类型，仅支持 .py 或 .jar 文件")
 
         return StdioServerParameters(command=command, args=args, env=None)
 
-    async def connect_to_mcp_server(self):
+    async def connect_to_mcp_server(self, server_name, path):
         """
         连接到 MCP 服务器，启动服务器并列出可用工具，将工具注入到 LLM 中。
+
+        :param server_name: 服务器名称
+        :param path: 服务器脚本文件路径
         """
         # 获取服务器启动参数
-        server_params = self.get_server_parameters()
+        server_params = self.get_server_parameters(path)
+
         # 启动 MCP 服务器并获取输入输出流
         stdio_transport = await self.exit_stack.enter_async_context(stdio_client(server_params))
         stdio, write = stdio_transport
+
         # 初始化 MCP 客户端会话
-        self.mcp_session = await self.exit_stack.enter_async_context(ClientSession(stdio, write))
-        await self.mcp_session.initialize()
+        session = await self.exit_stack.enter_async_context(ClientSession(stdio, write))
+        await session.initialize()
+
+        # 把当前 server 的 session 加入到字典，便于后续根据tool寻找server
+        self.mcp_session[server_name] = {"session": session, "stdio": stdio, "write": write}
 
         # 列出 MCP 服务器上的工具
-        mcp_response = await self.mcp_session.list_tools()
+        mcp_response = await session.list_tools()
         tools = mcp_response.tools
-        print("已连接 MCP 服务器，支持以下工具：\n", [tool.name for tool in tools])
+        print(f"已连接 MCP 服务器{server_name}，支持以下工具：\n", [tool.name for tool in tools])
+
         # 格式化可用工具
-        available_tools = format_available_tools(mcp_response)
-        # 将可用工具注入到 LLM 中
-        self.llm_app.set_tools(available_tools)
+        format_tools = format_available_tools(mcp_response)
+        for format_tool in format_tools:
+            self.available_tools.append(format_tool)
+
+        # 构建 tool 与 server 的映射
+        for tool in tools:
+            self.tool_map[tool.name] = server_name
+
+
+    def set_llm_tools(self):
+        """
+        将可用工具注入到 LLM 中。
+        """
+        if self.available_tools:
+            self.llm_app.set_tools(self.available_tools)
 
     async def process_query(self, query: str) -> str:
         """
@@ -79,9 +109,11 @@ class MCPClient:
         if content.finish_reason == "tool_calls":
             # 解析所有工具调用
             tool_calls = handle_tool_call(content)
+
             # 并发执行所有工具调用
             tool_results = await self.run_tools_concurrently(tool_calls)
-            print(tool_results)
+            # print(tool_results)
+
             # 将工具调用结果和初始查询重新发送给 LLM
             response = self.llm_app.generate_response(
                 prompt_index=2,
@@ -102,9 +134,15 @@ class MCPClient:
         tasks = []
         for tool_call in tool_calls:
             try:
+                tool_name = tool_call.get("name")
+                # print(tool_name)
+
+                # 确定当前工具使用哪一个 server 的 session
+                session = self.mcp_session.get(self.tool_map.get(tool_name)).get("session")
+
                 # 创建工具调用任务
-                task = self.mcp_session.call_tool(
-                    tool_call.get("name"),
+                task = session.call_tool(
+                    tool_name,
                     tool_call.get("args")
                 )
                 tasks.append(task)
@@ -113,6 +151,7 @@ class MCPClient:
 
         # 并发执行所有工具调用任务
         results = await asyncio.gather(*tasks, return_exceptions=True)
+
         processed_results = []
         for i, result in enumerate(results):
             if isinstance(result, Exception):
@@ -133,8 +172,10 @@ class MCPClient:
             try:
                 # 获取用户输入
                 query = input("\nQuery: ").strip()
+
                 if query.lower() == 'quit':
                     break
+
                 # 处理用户查询
                 response = await self.process_query(query)
                 print(f"\n🤖 AI: {response}")
@@ -147,15 +188,34 @@ class MCPClient:
         """
         await self.exit_stack.aclose()
 
+    async def connect_to_all_servers(self):
+        """
+        连接到所有 MCP 服务器，并设置 LLM 工具。
+        """
+        for path in self.server_script_path:
+            print(path)
+            await self.connect_to_mcp_server(path, path)
+
+        self.set_llm_tools()
+
 
 async def main():
     # 初始化 LLM
     llm = AIApp(config_file='llm_model/config.ini')
+
+    # 服务器脚本路径列表
+    server_script_path = [
+        "mcp_server/mcp-server-0.0.1-SNAPSHOT.jar",
+        "mcp_server/mcp_server_starter.py"
+    ]
+
     # 创建 MCP 客户端实例
-    client = MCPClient(llm=llm, server_script_path="mcp_server/mcp-server-0.0.1-SNAPSHOT.jar")
+    client = MCPClient(llm=llm, server_script_path=server_script_path)
+
     try:
-        # 连接到 MCP 服务器
-        await client.connect_to_mcp_server()
+        # 连接到所有 MCP 服务器
+        await client.connect_to_all_servers()
+
         # 启动聊天循环
         await client.chat_loop()
     finally:
